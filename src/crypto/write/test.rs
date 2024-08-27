@@ -1,13 +1,126 @@
-use std::io;
-use std::io::{Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom, Write};
 
-use secrecy::SecretVec;
+use ring::aead::{Aad, Algorithm, BoundKey, OpeningKey, UnboundKey, CHACHA20_POLY1305, NONCE_LEN};
+use secrecy::{ExposeSecret, SecretVec};
+use std::sync::{Arc, Mutex};
 #[allow(unused_imports)]
 use tracing_test::traced_test;
 
 use crate::crypto;
-use crate::crypto::read::CryptoRead;
+use crate::crypto::read::{CryptoRead, ExistingNonceSequence};
+use crate::crypto::write::{CryptoWrite, CryptoWriteSeek};
 use crate::crypto::Cipher;
+
+fn create_secret_key(key_len: usize) -> SecretVec<u8> {
+    use rand::RngCore;
+    use secrecy::SecretVec;
+    let mut key = vec![0; key_len];
+    rand::thread_rng().fill_bytes(&mut key);
+    SecretVec::new(key)
+}
+
+fn verify_encryption(
+    mut plaintext: &[u8],
+    encrypted: &[u8],
+    algorithm: &'static Algorithm,
+    key: &SecretVec<u8>,
+) -> bool {
+    if encrypted.len() < plaintext.len() {
+        return false;
+    }
+    let nonce = &encrypted[..NONCE_LEN];
+
+    let key_bytes = &key.expose_secret();
+    let unbound_key = UnboundKey::new(algorithm, key_bytes).unwrap();
+    let nonce_sequence = ExistingNonceSequence::new(Arc::new(Mutex::new(Some(nonce.to_vec()))));
+    let mut opening_key = OpeningKey::new(unbound_key, nonce_sequence);
+
+    let mut decrypted = encrypted[NONCE_LEN..].to_vec();
+
+    let block_index: u64 = 0;
+    let aad = Aad::from(block_index.to_le_bytes());
+    matches!(opening_key.open_in_place(aad, &mut decrypted), Ok(decrypted_data) if decrypted_data == plaintext)
+}
+
+#[test]
+#[traced_test]
+fn test_encryption() {
+    let writer = Vec::new();
+    let cipher = Cipher::ChaCha20Poly1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = crypto::create_write(writer, cipher, &key);
+
+    let data = b"hello, world!";
+    crypto_writer.write_all(data).unwrap();
+    let encrypted = crypto_writer.finish().unwrap();
+    assert!(verify_encryption(
+        data,
+        &encrypted,
+        &CHACHA20_POLY1305,
+        &key
+    ));
+}
+#[test]
+#[traced_test]
+fn test_basic_write() {
+    let writer = Vec::new();
+    let cipher = Cipher::ChaCha20Poly1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = crypto::create_write(writer, cipher, &key);
+
+    let data = b"hello, world!";
+
+    assert_eq!(crypto_writer.write(data).unwrap(), data.len());
+
+    let result = crypto_writer.finish().unwrap();
+
+    assert!(result.len() > data.len());
+}
+
+#[test]
+#[traced_test]
+fn test_flush() {
+    use super::{CryptoWrite, RingCryptoWrite};
+    use ring::aead::CHACHA20_POLY1305;
+    let writer = Vec::new();
+    let cipher = &CHACHA20_POLY1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = RingCryptoWrite::new(writer, cipher, &key);
+
+    let data = b"Hello, world!";
+
+    crypto_writer.write_all(data).unwrap();
+
+    crypto_writer.flush().unwrap();
+
+    assert_eq!(crypto_writer.buf.available(), 0);
+}
+
+#[test]
+#[traced_test]
+#[should_panic(expected = "write called on already finished writer")]
+fn test_write_after_finish() {
+    use super::{CryptoWrite, RingCryptoWrite};
+    use ring::aead::CHACHA20_POLY1305;
+    let writer = Vec::new();
+    let cipher = &CHACHA20_POLY1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = RingCryptoWrite::new(writer, cipher, &key);
+
+    let data = b"Hello, world!";
+
+    crypto_writer.finish().unwrap();
+
+    crypto_writer.write_all(data).unwrap();
+}
+
+#[test]
+#[traced_test]
+fn test_basic_seek() {}
 
 #[test]
 #[traced_test]
@@ -17,16 +130,13 @@ fn test_reader_writer_chacha() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::ChaCha20Poly1305;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     // simple text
     let mut cursor = io::Cursor::new(vec![0; 0]);
@@ -63,16 +173,13 @@ fn test_reader_writer_1mb_chacha() {
     use std::io::SeekFrom;
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::CryptoWrite;
     use crate::crypto::Cipher;
 
     let cipher = Cipher::ChaCha20Poly1305;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = 1024 * 1024;
 
@@ -98,16 +205,13 @@ fn test_reader_writer_aes() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::Aes256Gcm;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     // simple text
     let mut cursor = io::Cursor::new(vec![0; 0]);
@@ -144,16 +248,13 @@ fn test_reader_writer_1mb_aes() {
     use std::io::SeekFrom;
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::CryptoWrite;
     use crate::crypto::Cipher;
 
     let cipher = Cipher::Aes256Gcm;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = 1024 * 1024;
 
@@ -179,18 +280,13 @@ fn test_writer_seek_text_chacha() {
     use std::io::{Read, Seek};
     use std::io::{SeekFrom, Write};
 
-    use rand::RngCore;
-    use secrecy::SecretVec;
-
     use crate::crypto;
     use crate::crypto::read::CryptoRead;
     use crate::crypto::write::CryptoWrite;
     use crate::crypto::Cipher;
 
     let cipher = Cipher::ChaCha20Poly1305;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let mut cursor = io::Cursor::new(vec![0; 0]);
     let mut writer = crypto::create_write_seek(cursor, cipher, &key);
@@ -313,18 +409,13 @@ fn test_writer_seek_text_aes() {
     use std::io::{Read, Seek};
     use std::io::{SeekFrom, Write};
 
-    use rand::RngCore;
-    use secrecy::SecretVec;
-
     use crate::crypto;
     use crate::crypto::read::CryptoRead;
     use crate::crypto::write::CryptoWrite;
     use crate::crypto::Cipher;
 
     let cipher = Cipher::Aes256Gcm;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let mut cursor = io::Cursor::new(vec![0; 0]);
     let mut writer = crypto::create_write_seek(cursor, cipher, &key);
@@ -448,16 +539,13 @@ fn test_writer_seek_blocks_chacha() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::ChaCha20Poly1305;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = BLOCK_SIZE * 3 + 42;
     let data = [42];
@@ -624,16 +712,13 @@ fn test_writer_seek_blocks_aes() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::Aes256Gcm;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = BLOCK_SIZE * 3 + 42;
     let data = [42];
@@ -801,16 +886,13 @@ fn test_writer_seek_blocks_one_go_chacha() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::ChaCha20Poly1305;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = BLOCK_SIZE * 3 + 42;
     let data = [42];
@@ -921,16 +1003,13 @@ fn test_writer_seek_blocks_one_go_aes() {
     use std::io::{SeekFrom, Write};
 
     use rand::RngCore;
-    use secrecy::SecretVec;
 
     use crate::crypto;
     use crate::crypto::write::{CryptoWrite, BLOCK_SIZE};
     use crate::crypto::Cipher;
 
     let cipher = Cipher::Aes256Gcm;
-    let mut key: Vec<u8> = vec![0; cipher.key_len()];
-    rand::thread_rng().fill_bytes(&mut key);
-    let key = SecretVec::new(key);
+    let key = create_secret_key(cipher.key_len());
 
     let len = BLOCK_SIZE * 3 + 42;
     let data = [42];
