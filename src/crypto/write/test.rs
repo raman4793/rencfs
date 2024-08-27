@@ -1,6 +1,6 @@
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom};
 
-use ring::aead::{Aad, Algorithm, BoundKey, OpeningKey, UnboundKey, CHACHA20_POLY1305, NONCE_LEN};
+use ring::aead::{Aad, Algorithm, BoundKey, OpeningKey, UnboundKey, NONCE_LEN};
 use secrecy::{ExposeSecret, SecretVec};
 use std::sync::{Arc, Mutex};
 #[allow(unused_imports)]
@@ -8,7 +8,6 @@ use tracing_test::traced_test;
 
 use crate::crypto;
 use crate::crypto::read::{CryptoRead, ExistingNonceSequence};
-use crate::crypto::write::{CryptoWrite, CryptoWriteSeek};
 use crate::crypto::Cipher;
 
 fn create_secret_key(key_len: usize) -> SecretVec<u8> {
@@ -20,7 +19,7 @@ fn create_secret_key(key_len: usize) -> SecretVec<u8> {
 }
 
 fn verify_encryption(
-    mut plaintext: &[u8],
+    plaintext: &[u8],
     encrypted: &[u8],
     algorithm: &'static Algorithm,
     key: &SecretVec<u8>,
@@ -45,6 +44,9 @@ fn verify_encryption(
 #[test]
 #[traced_test]
 fn test_encryption() {
+    use super::CryptoWrite;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Write;
     let writer = Vec::new();
     let cipher = Cipher::ChaCha20Poly1305;
     let key = create_secret_key(cipher.key_len());
@@ -64,6 +66,8 @@ fn test_encryption() {
 #[test]
 #[traced_test]
 fn test_basic_write() {
+    use super::CryptoWrite;
+    use std::io::Write;
     let writer = Vec::new();
     let cipher = Cipher::ChaCha20Poly1305;
     let key = create_secret_key(cipher.key_len());
@@ -82,8 +86,9 @@ fn test_basic_write() {
 #[test]
 #[traced_test]
 fn test_flush() {
-    use super::{CryptoWrite, RingCryptoWrite};
+    use super::RingCryptoWrite;
     use ring::aead::CHACHA20_POLY1305;
+    use std::io::Write;
     let writer = Vec::new();
     let cipher = &CHACHA20_POLY1305;
     let key = create_secret_key(cipher.key_len());
@@ -105,6 +110,7 @@ fn test_flush() {
 fn test_write_after_finish() {
     use super::{CryptoWrite, RingCryptoWrite};
     use ring::aead::CHACHA20_POLY1305;
+    use std::io::Write;
     let writer = Vec::new();
     let cipher = &CHACHA20_POLY1305;
     let key = create_secret_key(cipher.key_len());
