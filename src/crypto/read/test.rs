@@ -1,5 +1,61 @@
+use std::io::Read;
+
+use secrecy::{ExposeSecret, SecretVec};
 #[allow(unused_imports)]
 use tracing_test::traced_test;
+
+fn create_secret_key(key_len: usize) -> SecretVec<u8> {
+    use rand::RngCore;
+    use secrecy::SecretVec;
+    let mut key = vec![0; key_len];
+    rand::thread_rng().fill_bytes(&mut key);
+    SecretVec::new(key)
+}
+
+#[test]
+#[traced_test]
+fn test_read_empty() {
+    use super::RingCryptoRead;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+    let reader = Cursor::new(vec![]);
+    let mut buf = [0u8; 10];
+    let cipher = &CHACHA20_POLY1305;
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_reader = RingCryptoRead::new(reader, cipher, &key);
+    let result = &crypto_reader.read(&mut buf).unwrap();
+    let expected: usize = 0;
+    assert_eq!(*result, expected);
+}
+
+#[test]
+#[traced_test]
+fn test_basic_read() {
+    use super::RingCryptoRead;
+    use crate::crypto::{create_write, read::CryptoRead, write::CryptoWrite, Cipher};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+
+    let writer = Vec::new();
+    let cipher = Cipher::ChaCha20Poly1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = create_write(writer, cipher, &key);
+
+    let data = b"hello, world!";
+    crypto_writer.write_all(data).unwrap();
+    let encrypted = crypto_writer.finish().unwrap();
+
+    let reader = Cursor::new(encrypted);
+
+    let mut buf = [0u8; 13];
+    let cipher = &CHACHA20_POLY1305;
+    let mut crypto_reader = RingCryptoRead::new(reader, cipher, &key);
+
+    crypto_reader.read_exact(&mut buf).unwrap();
+
+    assert_eq!(*data, buf);
+}
 
 #[test]
 #[traced_test]
