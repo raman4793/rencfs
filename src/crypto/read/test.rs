@@ -1,5 +1,185 @@
+use std::io::Read;
+
+use futures_util::io::Cursor;
+use secrecy::{ExposeSecret, SecretVec};
 #[allow(unused_imports)]
 use tracing_test::traced_test;
+
+fn create_secret_key(key_len: usize) -> SecretVec<u8> {
+    use rand::RngCore;
+    use secrecy::SecretVec;
+    let mut key = vec![0; key_len];
+    rand::thread_rng().fill_bytes(&mut key);
+    SecretVec::new(key)
+}
+
+fn create_encrypted_data(data: &[u8], key: &SecretVec<u8>) -> Vec<u8> {
+    use crate::crypto;
+    use crate::crypto::write::CryptoWrite;
+    use crate::crypto::Cipher;
+    use std::io::Write;
+    let writer = Vec::new();
+    let cipher = Cipher::ChaCha20Poly1305;
+
+    let mut crypto_writer = crypto::create_write(writer, cipher, key);
+
+    crypto_writer.write_all(data).unwrap();
+
+    crypto_writer.finish().unwrap()
+}
+
+#[test]
+#[traced_test]
+fn test_read_empty() {
+    use super::RingCryptoRead;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+    let reader = Cursor::new(vec![]);
+    let mut buf = [0u8; 10];
+    let cipher = &CHACHA20_POLY1305;
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_reader = RingCryptoRead::new(reader, cipher, &key);
+    let result = &crypto_reader.read(&mut buf).unwrap();
+    let expected: usize = 0;
+    assert_eq!(*result, expected);
+}
+
+#[test]
+#[traced_test]
+fn test_basic_read() {
+    use super::RingCryptoRead;
+    use crate::crypto::{create_write, read::CryptoRead, write::CryptoWrite, Cipher};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+
+    let writer = Vec::new();
+    let cipher = Cipher::ChaCha20Poly1305;
+    let key = create_secret_key(cipher.key_len());
+
+    let mut crypto_writer = create_write(writer, cipher, &key);
+
+    let data = b"hello, world!";
+    crypto_writer.write_all(data).unwrap();
+    let encrypted = crypto_writer.finish().unwrap();
+
+    let reader = Cursor::new(encrypted);
+
+    let mut buf = [0u8; 13];
+    let cipher = &CHACHA20_POLY1305;
+    let mut crypto_reader = RingCryptoRead::new(reader, cipher, &key);
+
+    crypto_reader.read_exact(&mut buf).unwrap();
+
+    assert_eq!(*data, buf);
+}
+
+#[test]
+#[traced_test]
+fn test_read_single_block() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+
+    let binding = "h".repeat(BLOCK_SIZE);
+    let data = binding.as_bytes();
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let encrypted_data = create_encrypted_data(data, &key);
+    let mut reader = RingCryptoRead::new(Cursor::new(encrypted_data), &CHACHA20_POLY1305, &key);
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    assert_eq!(reader.read(&mut buf).unwrap(), BLOCK_SIZE);
+}
+
+#[test]
+#[traced_test]
+fn test_read_multiple_blocks() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+
+    let num_blocks = 5;
+
+    let block_size = BLOCK_SIZE * num_blocks;
+
+    let binding = "h".repeat(block_size);
+    let data = binding.as_bytes();
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let encrypted_data = create_encrypted_data(data, &key);
+    let mut reader = RingCryptoRead::new(Cursor::new(encrypted_data), &CHACHA20_POLY1305, &key);
+    let mut buf = vec![0u8; block_size];
+    for _ in 0..num_blocks {
+        assert_eq!(reader.read(&mut buf).unwrap(), BLOCK_SIZE);
+    }
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+}
+
+#[test]
+#[traced_test]
+fn test_partial_read() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+
+    let binding = "h".repeat(BLOCK_SIZE);
+    let data = binding.as_bytes();
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let encrypted_data = create_encrypted_data(data, &key);
+    let mut reader = RingCryptoRead::new(Cursor::new(encrypted_data), &CHACHA20_POLY1305, &key);
+    let mut buf = vec![0u8; BLOCK_SIZE / 2];
+    assert_eq!(reader.read(&mut buf).unwrap(), BLOCK_SIZE / 2);
+}
+
+#[test]
+#[traced_test]
+fn test_read_one_byte_less_than_block() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE, NONCE_LEN};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+    let data = vec![0u8; NONCE_LEN + BLOCK_SIZE + CHACHA20_POLY1305.tag_len() - 1];
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut reader = RingCryptoRead::new(Cursor::new(data), &CHACHA20_POLY1305, &key);
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    assert!(reader.read(&mut buf).is_err());
+}
+
+#[test]
+#[traced_test]
+fn test_alternating_small_and_large_reads() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+
+    let num_blocks = 5;
+
+    let block_size = BLOCK_SIZE + num_blocks;
+
+    let binding = "h".repeat(block_size);
+    let data = binding.as_bytes();
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let encrypted_data = create_encrypted_data(data, &key);
+    let mut reader = RingCryptoRead::new(Cursor::new(encrypted_data), &CHACHA20_POLY1305, &key);
+    let mut small_buf = vec![0u8; 10];
+    let mut large_buf = vec![0u8; 40];
+    assert_eq!(reader.read(&mut small_buf).unwrap(), 10);
+    assert_eq!(reader.read(&mut large_buf).unwrap(), 40);
+    assert_eq!(reader.read(&mut small_buf).unwrap(), 10);
+    assert_eq!(reader.read(&mut large_buf).unwrap(), 40);
+    assert_eq!(reader.read(&mut small_buf).unwrap(), 5);
+    assert_eq!(reader.read(&mut large_buf).unwrap(), 0);
+    assert_eq!(reader.read(&mut small_buf).unwrap(), 0);
+}
+
+#[test]
+#[traced_test]
+fn test_read_one_byte_more_than_block() {
+    use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE, NONCE_LEN};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+    let data = vec![0u8; NONCE_LEN + BLOCK_SIZE + CHACHA20_POLY1305.tag_len() + 1];
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut reader = RingCryptoRead::new(Cursor::new(data), &CHACHA20_POLY1305, &key);
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    assert!(reader.read(&mut buf).is_err());
+}
 
 #[test]
 #[traced_test]
