@@ -10,8 +10,7 @@ use crate::crypto;
 use crate::crypto::read::{CryptoRead, ExistingNonceSequence};
 use crate::crypto::Cipher;
 
-use super::CryptoWrite;
-
+#[allow(dead_code)]
 fn create_secret_key(key_len: usize) -> SecretVec<u8> {
     use rand::RngCore;
     use secrecy::SecretVec;
@@ -20,6 +19,7 @@ fn create_secret_key(key_len: usize) -> SecretVec<u8> {
     SecretVec::new(key)
 }
 
+#[allow(dead_code)]
 fn verify_encryption(
     plaintext: &[u8],
     encrypted: &[u8],
@@ -88,7 +88,7 @@ fn test_basic_write() {
 #[test]
 #[traced_test]
 fn test_flush() {
-    use super::RingCryptoWrite;
+    use super::{CryptoWrite, RingCryptoWrite};
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Write;
     let writer = Vec::new();
@@ -231,7 +231,7 @@ fn test_pos_after_write_full_block() {
     let full_block = vec![0u8; crypto_writer.inner.plaintext_block_size];
     crypto_writer.write_all(&full_block).unwrap();
     assert_eq!(
-        crypto_writer.pos() as usize,
+        usize::try_from(crypto_writer.pos()).unwrap(),
         crypto_writer.inner.plaintext_block_size
     );
 }
@@ -248,7 +248,10 @@ fn test_pos_after_write_multiple_blocks() {
 
     let data = vec![0u8; crypto_writer.inner.plaintext_block_size * 3 + 100];
     crypto_writer.write_all(&data).unwrap();
-    assert_eq!(crypto_writer.pos() as usize, data.len());
+    assert_eq!(
+        usize::try_from(crypto_writer.pos()).unwrap() as usize,
+        data.len()
+    );
 }
 
 #[test]
@@ -285,16 +288,16 @@ fn test_pos_after_flush() {
 #[test]
 #[traced_test]
 fn test_pos_consistency_with_seek() {
-    use super::{CryptoWrite, RingCryptoWriteSeek};
+    use super::RingCryptoWriteSeek;
     use ring::aead::CHACHA20_POLY1305;
-    use std::io::{Cursor, Seek, SeekFrom, Write};
+    use std::io::{Cursor, Seek, Write};
     let writer = Cursor::new(Vec::new());
     let key = create_secret_key(CHACHA20_POLY1305.key_len());
     let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
 
     crypto_writer.write_all(b"Hello, World!").unwrap();
     let pos1 = crypto_writer.pos();
-    let pos2 = crypto_writer.seek(SeekFrom::Current(0)).unwrap();
+    let pos2 = crypto_writer.stream_position().unwrap();
     assert_eq!(pos1, pos2);
 }
 

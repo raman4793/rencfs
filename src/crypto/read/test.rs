@@ -1,10 +1,7 @@
-use std::io::Read;
-
-use futures_util::io::Cursor;
-use secrecy::{ExposeSecret, SecretVec};
+use secrecy::SecretVec;
 #[allow(unused_imports)]
 use tracing_test::traced_test;
-
+#[allow(dead_code)]
 fn create_secret_key(key_len: usize) -> SecretVec<u8> {
     use rand::RngCore;
     use secrecy::SecretVec;
@@ -12,7 +9,7 @@ fn create_secret_key(key_len: usize) -> SecretVec<u8> {
     rand::thread_rng().fill_bytes(&mut key);
     SecretVec::new(key)
 }
-
+#[allow(dead_code)]
 fn create_encrypted_data(data: &[u8], key: &SecretVec<u8>) -> Vec<u8> {
     use crate::crypto;
     use crate::crypto::write::CryptoWrite;
@@ -34,6 +31,7 @@ fn test_read_empty() {
     use super::RingCryptoRead;
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
+    use std::io::Read;
     let reader = Cursor::new(vec![]);
     let mut buf = [0u8; 10];
     let cipher = &CHACHA20_POLY1305;
@@ -48,8 +46,9 @@ fn test_read_empty() {
 #[traced_test]
 fn test_basic_read() {
     use super::RingCryptoRead;
-    use crate::crypto::{create_write, read::CryptoRead, write::CryptoWrite, Cipher};
+    use crate::crypto::{create_write, write::CryptoWrite, Cipher};
     use ring::aead::CHACHA20_POLY1305;
+    use std::io::Read;
     use std::io::{Cursor, Write};
 
     let writer = Vec::new();
@@ -80,6 +79,7 @@ fn test_read_single_block() {
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
 
+    use std::io::Read;
     let binding = "h".repeat(BLOCK_SIZE);
     let data = binding.as_bytes();
     let key = create_secret_key(CHACHA20_POLY1305.key_len());
@@ -96,6 +96,7 @@ fn test_read_multiple_blocks() {
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
 
+    use std::io::Read;
     let num_blocks = 5;
 
     let block_size = BLOCK_SIZE * num_blocks;
@@ -119,6 +120,7 @@ fn test_partial_read() {
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
 
+    use std::io::Read;
     let binding = "h".repeat(BLOCK_SIZE);
     let data = binding.as_bytes();
     let key = create_secret_key(CHACHA20_POLY1305.key_len());
@@ -134,6 +136,7 @@ fn test_read_one_byte_less_than_block() {
     use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE, NONCE_LEN};
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
+    use std::io::Read;
     let data = vec![0u8; NONCE_LEN + BLOCK_SIZE + CHACHA20_POLY1305.tag_len() - 1];
     let key = create_secret_key(CHACHA20_POLY1305.key_len());
     let mut reader = RingCryptoRead::new(Cursor::new(data), &CHACHA20_POLY1305, &key);
@@ -148,6 +151,7 @@ fn test_alternating_small_and_large_reads() {
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
 
+    use std::io::Read;
     let num_blocks = 5;
 
     let block_size = BLOCK_SIZE + num_blocks;
@@ -174,6 +178,7 @@ fn test_read_one_byte_more_than_block() {
     use crate::crypto::read::{RingCryptoRead, BLOCK_SIZE, NONCE_LEN};
     use ring::aead::CHACHA20_POLY1305;
     use std::io::Cursor;
+    use std::io::Read;
     let data = vec![0u8; NONCE_LEN + BLOCK_SIZE + CHACHA20_POLY1305.tag_len() + 1];
     let key = create_secret_key(CHACHA20_POLY1305.key_len());
     let mut reader = RingCryptoRead::new(Cursor::new(data), &CHACHA20_POLY1305, &key);
@@ -236,7 +241,6 @@ fn test_ring_crypto_read_seek_aes() {
     use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
     use ring::aead::AES_256_GCM;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite};
@@ -286,7 +290,6 @@ fn test_ring_crypto_read_seek_blocks_chacha() {
 
     use rand::Rng;
     use ring::aead::CHACHA20_POLY1305;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -338,7 +341,6 @@ fn test_ring_crypto_read_seek_blocks_aes() {
 
     use rand::Rng;
     use ring::aead::AES_256_GCM;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -390,7 +392,6 @@ fn test_ring_crypto_read_seek_blocks_boundary_chacha() {
 
     use rand::Rng;
     use ring::aead::CHACHA20_POLY1305;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -439,7 +440,6 @@ fn test_ring_crypto_read_seek_blocks_boundary_aes() {
 
     use rand::Rng;
     use ring::aead::AES_256_GCM;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -488,7 +488,6 @@ fn test_ring_crypto_read_seek_skip_blocks_chacha() {
 
     use rand::Rng;
     use ring::aead::CHACHA20_POLY1305;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -525,7 +524,6 @@ fn test_ring_crypto_read_seek_skip_blocks_aes() {
 
     use rand::Rng;
     use ring::aead::AES_256_GCM;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
@@ -562,7 +560,6 @@ fn test_ring_crypto_read_seek_in_second_block() {
 
     use rand::Rng;
     use ring::aead::AES_256_GCM;
-    use secrecy::SecretVec;
 
     use crate::crypto::read::RingCryptoRead;
     use crate::crypto::write::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
