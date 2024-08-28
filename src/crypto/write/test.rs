@@ -10,6 +10,8 @@ use crate::crypto;
 use crate::crypto::read::{CryptoRead, ExistingNonceSequence};
 use crate::crypto::Cipher;
 
+use super::CryptoWrite;
+
 fn create_secret_key(key_len: usize) -> SecretVec<u8> {
     use rand::RngCore;
     use secrecy::SecretVec;
@@ -99,7 +101,7 @@ fn test_flush() {
 
     crypto_writer.write_all(data).unwrap();
 
-    crypto_writer.flush().unwrap();
+    crypto_writer.finish().unwrap();
 
     assert_eq!(crypto_writer.buf.available(), 0);
 }
@@ -126,7 +128,175 @@ fn test_write_after_finish() {
 
 #[test]
 #[traced_test]
-fn test_basic_seek() {}
+fn test_encrypt_and_write_nonce_uniqueness() {
+    use super::{CryptoWrite, RingCryptoWrite, BLOCK_SIZE};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Write;
+    let writer = Vec::new();
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWrite::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(&[0u8; BLOCK_SIZE]).unwrap();
+    crypto_writer.write_all(&[0u8; BLOCK_SIZE]).unwrap();
+    let encrypted = crypto_writer.finish().unwrap();
+
+    let nonce1 = &encrypted[..NONCE_LEN];
+    let nonce2 = &encrypted[BLOCK_SIZE + NONCE_LEN + CHACHA20_POLY1305.tag_len()..][..NONCE_LEN];
+    assert_ne!(nonce1, nonce2, "Nonces should be unique for each block");
+}
+
+#[test]
+#[traced_test]
+fn test_pos_initial() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::Cursor;
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    assert_eq!(crypto_writer.pos(), 0);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_write() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    assert_eq!(crypto_writer.pos(), 13);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_multiple_writes() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello").unwrap();
+    crypto_writer.write_all(b", ").unwrap();
+    crypto_writer.write_all(b"World!").unwrap();
+    assert_eq!(crypto_writer.pos(), 13);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_seek() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    crypto_writer.seek(SeekFrom::Start(7)).unwrap();
+    assert_eq!(crypto_writer.pos(), 7);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_seek_beyond_end() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    crypto_writer.seek(SeekFrom::End(10)).unwrap();
+    assert_eq!(crypto_writer.pos(), 23);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_write_full_block() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    let full_block = vec![0u8; crypto_writer.inner.plaintext_block_size];
+    crypto_writer.write_all(&full_block).unwrap();
+    assert_eq!(
+        crypto_writer.pos() as usize,
+        crypto_writer.inner.plaintext_block_size
+    );
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_write_multiple_blocks() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    let data = vec![0u8; crypto_writer.inner.plaintext_block_size * 3 + 100];
+    crypto_writer.write_all(&data).unwrap();
+    assert_eq!(crypto_writer.pos() as usize, data.len());
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_seek_and_write() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    crypto_writer.seek(SeekFrom::Start(7)).unwrap();
+    crypto_writer.write_all(b"Rust!").unwrap();
+    assert_eq!(crypto_writer.pos(), 12);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_after_flush() {
+    use super::RingCryptoWriteSeek;
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    crypto_writer.flush().unwrap();
+    assert_eq!(crypto_writer.pos(), 13);
+}
+
+#[test]
+#[traced_test]
+fn test_pos_consistency_with_seek() {
+    use super::{CryptoWrite, RingCryptoWriteSeek};
+    use ring::aead::CHACHA20_POLY1305;
+    use std::io::{Cursor, Seek, SeekFrom, Write};
+    let writer = Cursor::new(Vec::new());
+    let key = create_secret_key(CHACHA20_POLY1305.key_len());
+    let mut crypto_writer = RingCryptoWriteSeek::new(writer, &CHACHA20_POLY1305, &key);
+
+    crypto_writer.write_all(b"Hello, World!").unwrap();
+    let pos1 = crypto_writer.pos();
+    let pos2 = crypto_writer.seek(SeekFrom::Current(0)).unwrap();
+    assert_eq!(pos1, pos2);
+}
 
 #[test]
 #[traced_test]
